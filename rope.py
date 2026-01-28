@@ -60,16 +60,26 @@ def apply_rotary_emb(
     key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
     # This separates each query/key vector into its odd and even indices (assuming *one-indexing*).
     # query_real contains q_1, q_3, q_5, ... and query_imag contains q_2, q_4, q_6, ...
-
+    pos_vec = torch.arange(0, seqlen, step=1, device=device)
+    inv_freq = theta ** (-2 * torch.arange(0, head_dim // 2, device=device) / head_dim)
+    freqs = torch.outer(pos_vec, inv_freq)
+    
     # First, compute the trigonometric values in the second and fourth columns in
     # slide 22 (linked above).
+    cos = torch.cos(freqs)
+    sin = torch.sin(freqs)
+    cos = reshape_for_broadcast(cos, query_real)
+    sin = reshape_for_broadcast(sin, query_real)
 
     # Then, combine these trigonometric values with the tensors query_real, query_imag,
     # key_real, and key_imag.
+    query_real_out = query_real * cos - query_imag * sin
+    query_imag_out = query_real * sin + query_imag * cos
+    key_real_out = key_real * cos - key_imag * sin
+    key_imag_out = key_real * sin + key_imag * cos
 
-    raise NotImplementedError
-
-    query_out = None
-    key_out = None
+    query_out = torch.stack((query_real_out, query_imag_out), dim=-1).reshape_as(query).type_as(query)
+    key_out = torch.stack((key_real_out, key_imag_out), dim=-1).reshape_as(key).type_as(key)
+    
     # Return the rotary position embeddings for the query and key tensors
     return query_out, key_out

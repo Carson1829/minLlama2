@@ -43,7 +43,7 @@ class RMSNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        # todo NOT CHECKED YET
+        # todo
         RMS = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         norm = x / RMS
         return norm
@@ -97,7 +97,7 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        # todo NOT CHECKED YET, ALSO, NOT SURE IF NEED TO USE CAUSAL MASKING
+        # todo
         weight = query @ key.transpose(-2,-1) / key.shape[-1]**0.5
         weight = F.softmax(weight, dim=-1)
         weight = self.attn_dropout(weight)
@@ -204,7 +204,7 @@ class LlamaLayer(nn.Module):
         5) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
-        # todo NOT CHECKED YET
+        # todo
         x = x + self.attention(self.attention_norm(x))
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
@@ -283,7 +283,7 @@ class Llama(LlamaPreTrainedModel):
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] # crop to just the final time step
-            # todo  NOT CHECKED
+            # todo
             if temperature == 0.0:
                 # select the single most likely index
                 probs = F.softmax(logits, dim=-1)
