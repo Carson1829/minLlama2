@@ -287,7 +287,7 @@ class Llama(LlamaPreTrainedModel):
             if temperature == 0.0:
                 # select the single most likely index
                 probs = F.softmax(logits, dim=-1)
-                idx_next = torch.topk(probs, k=1, dim=-1)
+                idx_next = torch.argmax(probs, dim=-1).unsqueeze(-1)
             else:
                 '''
                 Perform temperature sampling:
