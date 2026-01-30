@@ -9,6 +9,28 @@ from base_llama import LlamaPreTrainedModel, LlamaConfig
 from rope import apply_rotary_emb
 from utils import *
 
+class LoRALinear(nn.Module):
+    def __init__(self, linear, r=8, alpha=16):
+        super().__init__()
+        self.linear = linear
+        self.r = r
+        self.alpha = alpha
+        self.scaling = alpha / r
+
+        # Freeze base weights
+        for p in self.linear.parameters():
+            p.requires_grad = False
+
+        # LoRA params
+        self.lora_A = nn.Parameter(torch.zeros(r, linear.in_features))
+        self.lora_B = nn.Parameter(torch.zeros(linear.out_features, r))
+
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    def forward(self, x):
+        return self.linear(x) + (x @ self.lora_A.T @ self.lora_B.T) * self.scaling
+
 # Root Mean Square Layer Normalization (https://arxiv.org/abs/1910.07467)
 # borrowed from the official Llama implementation:
 # https://github.com/facebookresearch/llama/blob/main/llama/model.py
@@ -75,10 +97,28 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = config.dim // config.n_heads
         self.max_seq_len = config.max_seq_len
-        self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
+        # self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
+        # self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # self.compute_output = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
+        self.compute_query = LoRALinear(
+            nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False),
+            r=config.lora_r,
+            alpha=config.lora_alpha
+        )
+
+        self.compute_value = LoRALinear(
+            nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False),
+            r=config.lora_r,
+            alpha=config.lora_alpha
+        )
         self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.compute_output = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
+        self.compute_output = LoRALinear(
+            nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False),
+            r=config.lora_r,
+            alpha=config.lora_alpha
+        )
+        
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
@@ -233,12 +273,28 @@ class Llama(LlamaPreTrainedModel):
 
         # some useful precompute for the RoPE relative positional embeddings
 
+        '''
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
-            if pn.endswith('w3.weight') or pn.endswith('compute_output.weight'):
+            if pn.endswith('w3.weight') or pn.endswith('compute_output.linear.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layers))
+        '''
+        # Freeze entire base model
+        for p in self.parameters():
+            p.requires_grad = False
+        
+        for m in self.modules():
+            if isinstance(m, RMSNorm):
+                for p in m.parameters():
+                    p.requires_grad = True
+
+        # Re-enable LoRA params
+        for m in self.modules():
+            if isinstance(m, LoRALinear):
+                m.lora_A.requires_grad = True
+                m.lora_B.requires_grad = True
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -308,24 +364,24 @@ class Llama(LlamaPreTrainedModel):
         return idx
 
 def load_pretrained(checkpoint):
-  device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-  #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-  dtype = "float32"
+    device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+    #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+    dtype = "float32"
 
-  torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-  torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-  device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
-  ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-  ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+    ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+    ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-  # init from a model saved in a specific directory
-  checkpoint_dict = torch.load(checkpoint, map_location=device)
-  config = LlamaConfig(**checkpoint_dict['model_args'])
-  model = Llama(config)
-  state_dict = checkpoint_dict['model']
-  unwanted_prefix = '_orig_mod.'
-  for k,v in list(state_dict.items()):
-      if k.startswith(unwanted_prefix):
-          state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-  model.load_state_dict(state_dict, strict=False)
-  return model
+    # init from a model saved in a specific directory
+    checkpoint_dict = torch.load(checkpoint, map_location=device)
+    config = LlamaConfig(**checkpoint_dict['model_args'])
+    model = Llama(config)
+    state_dict = checkpoint_dict['model']
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict, strict=False)
+    return model
